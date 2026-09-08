@@ -6,8 +6,8 @@ import streamlit as st
 # ==========================================
 # 1. 페이지 기본 설정 및 제목 표시
 # ==========================================
-st.set_page_config(page_title="편의점 & 카페 지도 시각화", layout="wide")
-st.title("🏪 편의점 & ☕ 카페 위치 지도 탐색기")
+st.set_page_config(page_title="동별 편의점 & 카페 지도", layout="wide")
+st.title("🏪 동별 편의점 & ☕ 카페 위치 지도 탐색기")
 
 
 # ==========================================
@@ -51,7 +51,7 @@ def load_data():
             )
             return pd.DataFrame()
 
-    # 필수 컬럼 존재 여부 확인
+    # 필수 기본 컬럼 존재 여부 확인
     required_cols = ["상호명", "위도", "경도", "상권업종소분류명", "시도명"]
     for col in required_cols:
         if col not in df.columns:
@@ -68,6 +68,32 @@ def load_data():
     # 3) 위도/경도가 비어있는 결측치(NaN) 제거
     df = df.dropna(subset=["위도", "경도"])
 
+    # 4) 동(洞) 이름 열 자동 감지 (행정동명, 법정동명, 행정동명_표준 등 대응)
+    dong_col = None
+    possible_dong_cols = ["행정동명", "법정동명", "동명", "행정동", "법정동"]
+    for col in possible_dong_cols:
+        if col in df.columns:
+            dong_col = col
+            break
+
+    if dong_col:
+        df["지역_동"] = df[dong_col].fillna("기타/미분류")
+    else:
+        df["지역_동"] = "전체"
+
+    # 5) 시군구 열 감지
+    sigungu_col = None
+    possible_sigungu_cols = ["시군구명", "시군구", "구명"]
+    for col in possible_sigungu_cols:
+        if col in df.columns:
+            sigungu_col = col
+            break
+
+    if sigungu_col:
+        df["지역_시군구"] = df[sigungu_col].fillna("기타/미분류")
+    else:
+        df["지역_시군구"] = "전체"
+
     return df
 
 
@@ -79,16 +105,42 @@ if df_raw.empty:
 
 
 # ==========================================
-# 4. 사이드바 - 지역(시/도) 선택 필터
+# 4. 사이드바 - 지역(시/도 ➔ 시/군/구 ➔ 동) 세부 필터링
 # ==========================================
-st.sidebar.header("🔍 검색 및 필터 설정")
+st.sidebar.header("🔍 지역 선택")
 
-# 시도명 목록 추출 및 선택 박스 생성
+# 1단계: 시/도 선택
 sido_list = sorted(df_raw["시도명"].dropna().unique())
-selected_sido = st.sidebar.selectbox("지역(시/도) 선택", sido_list)
+selected_sido = st.sidebar.selectbox("1. 시/도 선택", sido_list)
 
-# 선택한 지역 데이터만 필터링
-df_filtered = df_raw[df_raw["시도명"] == selected_sido].copy()
+df_sido = df_raw[df_raw["시도명"] == selected_sido]
+
+# 2단계: 시/군/구 선택
+sigungu_list = ["전체"] + sorted(df_sido["지역_시군구"].dropna().unique().tolist())
+selected_sigungu = st.sidebar.selectbox("2. 시/군/구 선택", sigungu_list)
+
+if selected_sigungu != "전체":
+    df_sigungu = df_sido[df_sido["지역_시군구"] == selected_sigungu]
+else:
+    df_sigungu = df_sido
+
+# 3단계: 읍/면/동 선택
+dong_list = ["전체"] + sorted(df_sigungu["지역_동"].dropna().unique().tolist())
+selected_dong = st.sidebar.selectbox("3. 읍/면/동 선택", dong_list)
+
+# 최종 지역 필터링 적용
+if selected_dong != "전체":
+    df_filtered = df_sigungu[df_sigungu["지역_동"] == selected_dong].copy()
+else:
+    df_filtered = df_sigungu.copy()
+
+
+# 선택된 지역 명칭 타이틀 구성
+location_title = f"{selected_sido}"
+if selected_sigungu != "전체":
+    location_title += f" {selected_sigungu}"
+if selected_dong != "전체":
+    location_title += f" {selected_dong}"
 
 
 # ==========================================
@@ -136,7 +188,7 @@ if use_radius_search:
 # ==========================================
 # 6. 메인 화면 - 지표 카드(st.metric) 표시
 # ==========================================
-st.subheader(f"📊 {selected_sido} 매장 현황")
+st.subheader(f"📊 {location_title} 매장 현황")
 
 if search_info_text:
     st.caption(f"📌 {search_info_text}")
@@ -164,6 +216,11 @@ else:
     # 매장별 색상 지정 (편의점: 파란색, 카페: 주황색)
     color_map = {"편의점": "blue", "카페": "orange"}
 
+    # 동 단위 선택 여부에 따른 Zoom 레벨 조정 (동 단위일 때 더 확대)
+    default_zoom = 14 if selected_dong != "전체" else 12
+    if use_radius_search:
+        default_zoom = 14
+
     # Plotly 버전에 따른 최신(scatter_map) 및 구버전(scatter_mapbox) 호환 분기 처리
     if hasattr(px, "scatter_map"):
         fig = px.scatter_map(
@@ -173,8 +230,13 @@ else:
             color="상권업종소분류명",
             color_discrete_map=color_map,
             hover_name="상호명",
-            hover_data={"상권업종소분류명": True, "위도": False, "경도": False},
-            zoom=11 if not use_radius_search else 13,
+            hover_data={
+                "상권업종소분류명": True,
+                "지역_동": True,
+                "위도": False,
+                "경도": False,
+            },
+            zoom=default_zoom,
             center=(
                 {"lat": center_lat, "lon": center_lon}
                 if use_radius_search and center_lat
@@ -191,8 +253,13 @@ else:
             color="상권업종소분류명",
             color_discrete_map=color_map,
             hover_name="상호명",
-            hover_data={"상권업종소분류명": True, "위도": False, "경도": False},
-            zoom=11 if not use_radius_search else 13,
+            hover_data={
+                "상권업종소분류명": True,
+                "지역_동": True,
+                "위도": False,
+                "경도": False,
+            },
+            zoom=default_zoom,
             center=(
                 {"lat": center_lat, "lon": center_lon}
                 if use_radius_search and center_lat
